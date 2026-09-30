@@ -14,9 +14,12 @@ contiennent ton mot de passe WiFi et le secret Firebase.
 | `index.html` | la page |
 | `app.js` | lecture de Firebase, cartes, graphes |
 | `style.css` | le style (fond noir, couleurs de la station) |
-| `manifest.webmanifest`, `icons/` | ce qui la rend installable comme une appli |
+| `manifest.webmanifest`, `icone-*.png`, `apple-touch-icon.png` | ce qui la rend installable comme une appli |
 | `sw.js` | garde l'appli en cache pour qu'elle s'ouvre vite |
-| `lib/` | uPlot, la bibliothèque des graphes (licence MIT) |
+| `uplot.min.js`, `uplot.min.css` | uPlot, la bibliothèque des graphes (licence MIT, voir `uplot-licence.txt`) |
+
+Tous les fichiers sont au même niveau, **sans sous-dossier** : c'est voulu, car
+l'envoi par glisser-déposer sur GitHub oublie parfois les dossiers.
 
 ## 1. Règles Firebase (une fois)
 
@@ -37,9 +40,8 @@ la station continue d'écrire grâce à son secret.
 ## 2. Mise en ligne sur GitHub Pages (gratuit)
 
 1. Sur github.com : **New repository** → nom `station-meteo` → **Public** → *Create repository*.
-2. Sur la page du dépôt : **Add file → Upload files**, glisse **le contenu** du dossier
-   `appli_web` (les fichiers et les dossiers `icons` et `lib`, pas le dossier lui-même),
-   puis **Commit changes**.
+2. Sur la page du dépôt : **Add file → Upload files**, glisse **tous les fichiers** du dossier
+   `appli_web` (Cmd+A dans le Finder), puis **Commit changes**.
 3. **Settings → Pages** → *Source* : **Deploy from a branch** → branche **main**, dossier **/ (root)** → **Save**.
 4. Après une minute, l'adresse s'affiche en haut de cette page :
    `https://<ton-nom-github>.github.io/station-meteo/`
@@ -59,7 +61,10 @@ Pour une mise à jour plus tard : ré-uploade les fichiers modifiés de la même
 - **En touchant une mesure** :
   - *Évolution détaillée* : 1 point toutes les 5 minutes, sur 24 h, 3, 5 ou 30 jours
     (glisser pour zoomer, double-toucher pour revenir) ;
-  - *Historique complet* : le max et le min de chaque jour depuis le début, avec les records.
+  - *Historique* : des barres du min au max, 1 par jour (vue Mois), 1 par mois (vue Année)
+    ou sur tout l'historique, avec les records de la période.
+- **Tableau récapitulatif** (bouton en haut de l'accueil) : extérieur ou intérieur, jour par jour
+  sur un mois, mois par mois sur une année, ou année par année. Les records de la période sont soulignés.
 
 Les nouvelles mesures ajoutées sur la station extérieure apparaissent toutes seules.
 

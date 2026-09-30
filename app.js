@@ -47,7 +47,12 @@ const etat = {
   spark: {},           // clé -> [{t, v}] sur 24 h
   ouvert: null,        // clé de la mesure affichée en détail
   plageH: 72,
-  graphes: { detail: null, histo: null },
+  graphes: { detail: null },
+  resume: null,        // /resume complet (résumés quotidiens)
+  hVue: 'mois',        // historique du détail : mois / annee / tout
+  hPeriode: null,
+  recapOuvert: false,
+  rLieu: 'ext', rVue: 'mois', rPeriode: null,
 };
 
 /* =====================================================================
@@ -467,7 +472,7 @@ function axes(dec, unite) {
 function detruireGraphe(role) {
   if (etat.graphes[role]) { etat.graphes[role].destroy(); etat.graphes[role] = null; }
 }
-function detruireGraphes() { detruireGraphe('detail'); detruireGraphe('histo'); }
+function detruireGraphes() { detruireGraphe('detail'); }
 
 function largeurGraphe(el) { return Math.max(260, el.clientWidth); }
 function hauteurGraphe() { return window.innerWidth >= 700 ? 320 : 260; }
@@ -485,6 +490,9 @@ function ouvrirDetail(cle) {
   $('#detail').hidden = false;
   document.body.style.overflow = 'hidden';
   $('#detail').scrollTop = 0;
+  etat.hVue = 'mois';
+  etat.hPeriode = aujourdHui();
+  $('#h-info').textContent = 'Touchez une barre pour voir ses valeurs.';
   requestAnimationFrame(() => { chargerDetail(); chargerHistorique(); });
 }
 
@@ -558,82 +566,398 @@ async function chargerDetail() {
   etat.graphes.detail = g;
 }
 
-let jetonHisto = 0;
+/* =====================================================================
+   HISTORIQUE : résumés quotidiens (min / max / moyenne de chaque jour)
+   ===================================================================== */
+const MOIS_LONG = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août',
+                   'septembre', 'octobre', 'novembre', 'décembre'];
+const MOIS_INIT = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
+const JOURS_LONG = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+const majuscule = s => s.charAt(0).toUpperCase() + s.slice(1);
+const nbJoursMois = (an, mois) => new Date(an, mois, 0).getDate();      // mois : 1 à 12
+
+// Tous les résumés en une fois (quelques centaines de Ko par an), gardés 5 min
+let resumesCharges = 0, resumesPromesse = null;
+function chargerResumes(forcer = false) {
+  if (!forcer && etat.resume && Date.now() - resumesCharges < 5 * 60 * 1000) return Promise.resolve(etat.resume);
+  if (resumesPromesse) return resumesPromesse;
+  resumesPromesse = lire('/resume')
+    .then(r => { etat.resume = r || {}; resumesCharges = Date.now(); return etat.resume; })
+    .finally(() => { resumesPromesse = null; });
+  return resumesPromesse;
+}
+
+function joursDe(cle) {
+  const r = etat.resume?.[cle] || {};
+  return Object.entries(r)
+    .filter(([d, x]) => /^\d{4}-\d{2}-\d{2}$/.test(d) && x && x.min != null && x.max != null)
+    .map(([d, x]) => ({
+      d, an: +d.slice(0, 4), mois: +d.slice(5, 7), jour: +d.slice(8, 10),
+      min: x.min, max: x.max, moy: x.moy ?? (x.min + x.max) / 2, n: x.n || 1,
+    }))
+    .sort((a, b) => (a.d < b.d ? -1 : 1));
+}
+
+// Min, max (avec leur date), moyenne pondérée d'une liste de jours
+function agreger(jours) {
+  if (!jours.length) return null;
+  let mn = jours[0], mx = jours[0], s = 0, n = 0;
+  for (const j of jours) {
+    if (j.min < mn.min) mn = j;
+    if (j.max > mx.max) mx = j;
+    s += j.moy * j.n; n += j.n;
+  }
+  return { min: mn.min, dMin: mn.d, max: mx.max, dMax: mx.d, moy: s / n, nb: jours.length };
+}
+
+function dateLongue(d) {        // "mardi 29 septembre 2026"
+  const x = new Date(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10));
+  return `${JOURS_LONG[x.getDay()]} ${x.getDate()} ${MOIS_LONG[x.getMonth()]} ${x.getFullYear()}`;
+}
+function dateCourte(d) {        // "29.9.2026"
+  return `${+d.slice(8, 10)}.${+d.slice(5, 7)}.${d.slice(0, 4)}`;
+}
+
+// Affichage d'une valeur avec son unité (les lux en "k" au-delà de 10'000)
+function fmtVal(v, m, avecUnite = true) {
+  if (v == null || Number.isNaN(v)) return '–';
+  if (m.unite === 'lux' && Math.abs(v) >= 10000) return `${fmt(v / 1000, 0)}k${avecUnite ? ' lux' : ''}`;
+  return fmt(v, m.dec) + (avecUnite && m.unite ? ` ${m.unite}` : '');
+}
+
+/* ---------- Choix de la période (mois / année / tout) ---------- */
+function aujourdHui() { const d = new Date(); return { an: d.getFullYear(), mois: d.getMonth() + 1 }; }
+
+function titrePeriode(vue, p, premier) {
+  if (vue === 'mois') return `${majuscule(MOIS_LONG[p.mois - 1])} ${p.an}`;
+  if (vue === 'annee') return String(p.an);
+  return premier ? `Depuis ${MOIS_LONG[premier.mois - 1]} ${premier.an}` : 'Tout l’historique';
+}
+
+function decaler(vue, p, sens) {
+  if (vue === 'mois') {
+    let m = p.mois + sens, a = p.an;
+    if (m < 1) { m = 12; a--; } else if (m > 12) { m = 1; a++; }
+    return { an: a, mois: m };
+  }
+  if (vue === 'annee') return { an: p.an + sens, mois: p.mois };
+  return p;
+}
+
+// Bornes : du premier jour enregistré jusqu'à aujourd'hui
+function bornesOk(vue, p, premier) {
+  const auj = aujourdHui();
+  if (vue === 'mois') {
+    const k = p.an * 12 + p.mois;
+    return k <= auj.an * 12 + auj.mois && (!premier || k >= premier.an * 12 + premier.mois);
+  }
+  if (vue === 'annee') return p.an <= auj.an && (!premier || p.an >= premier.an);
+  return true;
+}
+
+/* ---------- Graphe en barres min → max (dessiné à la main, en SVG) ---------- */
+function echelle(lo, hi, n) {
+  const brut = (hi - lo) / n;
+  const p = Math.pow(10, Math.floor(Math.log10(brut)));
+  const f = brut / p;
+  const pas = (f < 1.5 ? 1 : f < 3 ? 2 : f < 7 ? 5 : 10) * p;
+  const a = Math.floor(lo / pas) * pas, b = Math.ceil(hi / pas) * pas;
+  const ticks = [];
+  for (let t = a; t <= b + pas / 2; t += pas) ticks.push(+t.toFixed(10));
+  return { ticks, a, b, pas };
+}
+
+function dessinerBarres(el, items, m, surChoix) {
+  const pleins = items.filter(i => i.min != null);
+  if (!pleins.length) { message(el, 'Pas de données pour cette période.'); return; }
+
+  const W = Math.max(280, el.clientWidth), H = window.innerWidth >= 700 ? 300 : 240;
+  const G = 46, D = 6, HAUT = 10, BAS = 24;
+  let lo = Math.min(...pleins.map(i => i.min)), hi = Math.max(...pleins.map(i => i.max));
+  if (hi - lo < 1e-9) { lo -= 1; hi += 1; }
+  const { ticks, a, b, pas: pasY } = echelle(lo, hi, 5);
+  const y = v => HAUT + (b - v) / (b - a) * (H - HAUT - BAS);
+  const n = items.length, pas = (W - G - D) / n;
+  const larg = Math.max(2, Math.min(26, pas * 0.62));
+  const mAxe = { ...m, dec: pasY < 1 ? 1 : 0 };
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img">`;
+  for (const t of ticks) {
+    svg += `<line x1="${G}" x2="${W - D}" y1="${y(t)}" y2="${y(t)}" stroke="#1f1f1f"/>` +
+           `<text x="${G - 7}" y="${y(t) + 4}" text-anchor="end" class="axe">${fmtVal(t, mAxe, false)}</text>`;
+  }
+  items.forEach((it, i) => {
+    const cx = G + pas * (i + 0.5);
+    if (it.etiquette) svg += `<text x="${cx}" y="${H - 7}" text-anchor="middle" class="axe">${it.etiquette}</text>`;
+    if (it.min == null) return;
+    const y1 = y(it.max), y2 = y(it.min), h = Math.max(3, y2 - y1);
+    const r = Math.min(larg / 2, 4);
+    svg += `<g class="barre" data-i="${i}">` +
+      `<rect x="${cx - pas / 2}" y="${HAUT}" width="${pas}" height="${H - HAUT - BAS}" fill="transparent"/>` +
+      `<rect class="corps" x="${cx - larg / 2}" y="${y1}" width="${larg}" height="${h}" rx="${r}" fill="${m.coul}"/>`;
+    if (larg >= 7) {
+      svg += `<circle cx="${cx}" cy="${y1}" r="${Math.min(3.5, larg / 3)}" fill="#ef4444"/>` +
+             `<circle cx="${cx}" cy="${y1 + h}" r="${Math.min(3.5, larg / 3)}" fill="#22d3ee"/>`;
+    }
+    if (it.moy != null) {
+      svg += `<line x1="${cx - larg / 2}" x2="${cx + larg / 2}" y1="${y(it.moy)}" y2="${y(it.moy)}" stroke="#000" stroke-width="2" opacity=".55"/>`;
+    }
+    svg += `</g>`;
+  });
+  svg += '</svg>';
+  el.innerHTML = svg;
+  el.querySelectorAll('.barre').forEach(g => g.addEventListener('click', () => {
+    el.querySelectorAll('.barre.choisie').forEach(x => x.classList.remove('choisie'));
+    g.classList.add('choisie');
+    surChoix(items[+g.dataset.i]);
+  }));
+}
+
+// Barres pour une vue : 1 par jour (mois), 1 par mois (année), 1 par mois ou par an (tout)
+function barresPourVue(jours, vue, p) {
+  const items = [];
+  if (vue === 'mois') {
+    const nb = nbJoursMois(p.an, p.mois);
+    for (let j = 1; j <= nb; j++) {
+      const x = jours.find(k => k.an === p.an && k.mois === p.mois && k.jour === j);
+      const montrer = j === 1 || j % 5 === 0;
+      items.push({ etiquette: montrer ? String(j) : '', min: x?.min ?? null, max: x?.max ?? null, moy: x?.moy ?? null,
+                   titre: x ? majuscule(dateLongue(x.d)) : null });
+    }
+  } else if (vue === 'annee') {
+    for (let mo = 1; mo <= 12; mo++) {
+      const g = agreger(jours.filter(k => k.an === p.an && k.mois === mo));
+      items.push({ etiquette: MOIS_INIT[mo - 1], min: g?.min ?? null, max: g?.max ?? null, moy: g?.moy ?? null,
+                   titre: `${majuscule(MOIS_LONG[mo - 1])} ${p.an}`, agg: g, lien: { an: p.an, mois: mo } });
+    }
+  } else if (jours.length) {
+    const deb = jours[0], auj = aujourdHui();
+    const nbMois = (auj.an * 12 + auj.mois) - (deb.an * 12 + deb.mois) + 1;
+    if (nbMois <= 36) {
+      for (let k = 0; k < nbMois; k++) {
+        const an = deb.an + Math.floor((deb.mois - 1 + k) / 12), mo = (deb.mois - 1 + k) % 12 + 1;
+        const g = agreger(jours.filter(x => x.an === an && x.mois === mo));
+        items.push({ etiquette: (mo === 1 || k === 0) ? `${MOIS_INIT[mo - 1]}'${String(an).slice(2)}` : MOIS_INIT[mo - 1],
+                     min: g?.min ?? null, max: g?.max ?? null, moy: g?.moy ?? null,
+                     titre: `${majuscule(MOIS_LONG[mo - 1])} ${an}`, agg: g, lien: { an, mois: mo } });
+      }
+    } else {
+      for (let an = deb.an; an <= auj.an; an++) {
+        const g = agreger(jours.filter(x => x.an === an));
+        items.push({ etiquette: String(an), min: g?.min ?? null, max: g?.max ?? null, moy: g?.moy ?? null,
+                     titre: String(an), agg: g, lienAn: an });
+      }
+    }
+  }
+  return items;
+}
+
+/* ---------- Bloc "Historique" de la page détail ---------- */
 async function chargerHistorique() {
   const cle = etat.ouvert;
   if (!cle) return;
-  const m = mesureParCle(cle);
   const el = $('#g-histo');
-  const jeton = ++jetonHisto;
-  detruireGraphe('histo');
-  message(el, 'Chargement…');
-  $('#h-stats').innerHTML = '';
+  if (!etat.resume) message(el, 'Chargement…');
+  try { await chargerResumes(); }
+  catch (e) { if (etat.ouvert === cle) message(el, 'Impossible de charger l’historique.'); return; }
+  if (etat.ouvert === cle) rendreHistorique();
+}
 
-  let res;
-  try { res = await lire(`/resume/${cle}`); }
-  catch (e) { if (jeton === jetonHisto) message(el, 'Impossible de charger l’historique.'); return; }
-  if (jeton !== jetonHisto || etat.ouvert !== cle) return;
+function rendreHistorique() {
+  const cle = etat.ouvert;
+  if (!cle || !etat.resume) return;
+  const m = mesureParCle(cle);
+  const jours = joursDe(cle);
+  const vue = etat.hVue, p = etat.hPeriode;
+  const premier = jours[0];
 
-  const jours = Object.entries(res || {})
-    .filter(([d, x]) => /^\d{4}-\d{2}-\d{2}$/.test(d) && x && x.min != null && x.max != null)
-    .map(([d, x]) => {
-      const [a, mo, j] = d.split('-').map(Number);
-      return { d, t: new Date(a, mo - 1, j, 12).getTime() / 1000, min: x.min, max: x.max, moy: x.moy };
-    })
-    .sort((p, q) => p.t - q.t);
+  for (const b of document.querySelectorAll('#h-vues button')) b.classList.toggle('actif', b.dataset.v === vue);
+  $('#h-titre').textContent = titrePeriode(vue, p, premier);
+  $('#h-prec').style.visibility = vue !== 'tout' && bornesOk(vue, decaler(vue, p, -1), premier) ? 'visible' : 'hidden';
+  $('#h-suiv').style.visibility = vue !== 'tout' && bornesOk(vue, decaler(vue, p, +1), premier) ? 'visible' : 'hidden';
+  $('#h-info').textContent = vue === 'mois' ? 'Touchez une barre pour voir ses valeurs.'
+                                            : 'Touchez une barre pour voir ses valeurs ; touchez-la encore pour l’ouvrir.';
 
-  if (!jours.length) {
-    message(el, 'Pas encore de résumé quotidien pour cette mesure.<br>Le premier apparaîtra aujourd’hui.');
-    return;
-  }
+  // Statistiques de la période affichée
+  const dansPeriode = jours.filter(j => vue === 'tout' || (j.an === p.an && (vue === 'annee' || j.mois === p.mois)));
+  const g = agreger(dansPeriode);
+  $('#h-stats').innerHTML = g ? `
+    <span class="max">max <b>${fmtVal(g.max, m)}</b> · ${dateCourte(g.dMax)}</span>
+    <span class="min">min <b>${fmtVal(g.min, m)}</b> · ${dateCourte(g.dMin)}</span>
+    <span>moyenne <b>${fmtVal(g.moy, m)}</b></span>
+    <span><b>${g.nb}</b> jour${g.nb > 1 ? 's' : ''}</span>` : '';
 
-  // Records
-  let rMax = jours[0], rMin = jours[0];
-  for (const j of jours) { if (j.max > rMax.max) rMax = j; if (j.min < rMin.min) rMin = j; }
-  const dj = j => fmtDate(new Date(j.t * 1000));
-  $('#h-stats').innerHTML = `
-    <span class="max">record max <b>${fmt(rMax.max, m.dec)} ${m.unite}</b> · ${dj(rMax)}</span>
-    <span class="min">record min <b>${fmt(rMin.min, m.dec)} ${m.unite}</b> · ${dj(rMin)}</span>
-    <span><b>${jours.length}</b> jour${jours.length > 1 ? 's' : ''} depuis le ${dj(jours[0])}</span>`;
-
-  // Colonnes avec coupure pour les jours manquants
-  const xs = [], maxs = [], mins = [], moys = [];
-  let prec = null;
-  for (const j of jours) {
-    if (prec !== null && j.t - prec > 1.5 * 86400) { xs.push(prec + 86400); maxs.push(null); mins.push(null); moys.push(null); }
-    xs.push(j.t); maxs.push(j.max); mins.push(j.min); moys.push(j.moy ?? null);
-    prec = j.t;
-  }
-
-  el.innerHTML = '';
-  detruireGraphe('histo');
-  const unSeulPoint = jours.length === 1;
-  const g = new uPlot({
-    width: largeurGraphe(el), height: hauteurGraphe(),
-    fmtDate: fmtDateFr,
-    scales: { x: { time: true, range: unSeulPoint ? (u, a, b) => [a - 3 * 86400, b + 3 * 86400] : undefined } },
-    cursor: { drag: { x: true, y: false }, points: { size: 7 } },
-    legend: { live: true },
-    series: [
-      { label: 'Jour', value: (u, t) => t == null ? '--' : fmtDate(new Date(t * 1000)) },
-      { label: 'Max', stroke: COUL.r, width: 2, points: { show: unSeulPoint || jours.length < 40, size: 5 },
-        value: (u, v) => v == null ? '--' : `${fmt(v, m.dec)} ${m.unite}` },
-      { label: 'Moyenne', stroke: '#6b7280', width: 1, dash: [4, 4], points: { show: false },
-        value: (u, v) => v == null ? '--' : `${fmt(v, m.dec)} ${m.unite}` },
-      { label: 'Min', stroke: COUL.c, width: 2, points: { show: unSeulPoint || jours.length < 40, size: 5 },
-        value: (u, v) => v == null ? '--' : `${fmt(v, m.dec)} ${m.unite}` },
-    ],
-    bands: [{ series: [1, 3], fill: m.coul + '14' }],
-    axes: axes(m.dec, m.unite),
-  }, [xs, maxs, moys, mins], el);
-  etat.graphes.histo = g;
+  const items = barresPourVue(jours, vue, p);
+  let dernierChoix = null;
+  dessinerBarres($('#g-histo'), items, m, it => {
+    if (dernierChoix === it && (it.lien || it.lienAn)) {           // 2e toucher : on descend d'un niveau
+      if (it.lien) { etat.hVue = 'mois'; etat.hPeriode = it.lien; }
+      else { etat.hVue = 'annee'; etat.hPeriode = { an: it.lienAn, mois: 1 }; }
+      rendreHistorique();
+      return;
+    }
+    dernierChoix = it;
+    $('#h-info').innerHTML = `<b>${it.titre}</b> — <span class="c-max">max ${fmtVal(it.max, m)}</span> · ` +
+      `<span class="c-min">min ${fmtVal(it.min, m)}</span> · moyenne ${fmtVal(it.moy, m)}`;
+  });
 }
 
 /* =====================================================================
-   NAVIGATION (le bouton retour du téléphone / du navigateur ferme le détail)
+   TABLEAU RÉCAPITULATIF (extérieur ou intérieur, par jour / mois / année)
+   ===================================================================== */
+const COLONNES = {
+  ext: [
+    { cle: 'ext_temperature', nom: 'Température', unite: '°C',  dec: 1, stats: ['min', 'max'], icone: 'thermo',   coul: COUL.b },
+    { cle: 'ext_humidite',    nom: 'Humidité',    unite: '%',   dec: 0, stats: ['min', 'max'], icone: 'goutte',   coul: COUL.c },
+    { cle: 'ext_pression',    nom: 'Pression',    unite: 'hPa', dec: 1, stats: ['min', 'max'], icone: 'pression', coul: COUL.v },
+    { cle: 'ext_indiceuv',    nom: 'UV',          unite: '',    dec: 1, stats: ['max'],        icone: 'uv',       coul: COUL.j },
+    { cle: 'ext_lumiere',     nom: 'Lumière',     unite: 'lux', dec: 0, stats: ['max'],        icone: 'lumiere',  coul: COUL.j },
+  ],
+  int: [
+    { cle: 'temp',  nom: 'Température', unite: '°C',    dec: 1, stats: ['min', 'max'], icone: 'thermo',     coul: COUL.b },
+    { cle: 'hum',   nom: 'Humidité',    unite: '%',     dec: 0, stats: ['min', 'max'], icone: 'goutte',     coul: COUL.c },
+    { cle: 'co2',   nom: 'CO₂',         unite: 'ppm',   dec: 0, stats: ['moy', 'max'], icone: 'nuage',      coul: COUL.v },
+    { cle: 'pm25',  nom: 'PM 2.5',      unite: 'µg/m³', dec: 0, stats: ['max'],        icone: 'particules', coul: COUL.o },
+    { cle: 'pm100', nom: 'PM 10',       unite: 'µg/m³', dec: 0, stats: ['max'],        icone: 'particules', coul: '#ea580c' },
+  ],
+};
+const EXCLUES = /batterie|tension|etat|uvbrut|ciel/;
+
+// Colonnes du tableau : les connues + toute nouvelle mesure extérieure enregistrée
+function colonnes(lieu) {
+  const liste = [...COLONNES[lieu]];
+  if (lieu === 'ext' && etat.resume) {
+    const connues = new Set(liste.map(c => c.cle));
+    const direct = etat.direct?.ext?.m || {};
+    for (const cle of Object.keys(etat.resume)) {
+      if (!cle.startsWith('ext_') || connues.has(cle) || EXCLUES.test(cle)) continue;
+      const x = direct[cle];
+      const icone = iconePour(x?.n || cle);
+      liste.push({ cle, nom: x?.n || cle.slice(4), unite: x?.u || '', dec: 1, stats: ['min', 'max'],
+                   icone, coul: couleurIcone(icone, COUL.w) });
+    }
+  }
+  return liste.filter(c => etat.resume?.[c.cle] || COLONNES[lieu].includes(c));
+}
+
+async function ouvrirRecap() {
+  etat.recapOuvert = true;
+  $('#recap').hidden = false;
+  document.body.style.overflow = 'hidden';
+  $('#recap').scrollTop = 0;
+  if (!etat.resume) $('#r-tableau').innerHTML = '<div class="message">Chargement…</div>';
+  try { await chargerResumes(); }
+  catch (e) { $('#r-tableau').innerHTML = '<div class="message">Impossible de charger l’historique.</div>'; return; }
+  rendreRecap();
+}
+
+function fermerRecap() {
+  etat.recapOuvert = false;
+  $('#recap').hidden = true;
+  if (!etat.ouvert) document.body.style.overflow = '';
+}
+
+function rendreRecap() {
+  if (!etat.recapOuvert || !etat.resume) return;
+  const lieu = etat.rLieu, vue = etat.rVue, p = etat.rPeriode;
+  const cols = colonnes(lieu);
+  const joursParCle = Object.fromEntries(cols.map(c => [c.cle, joursDe(c.cle)]));
+
+  // Premier jour enregistré, toutes colonnes confondues
+  let premier = null;
+  for (const js of Object.values(joursParCle)) if (js[0] && (!premier || js[0].d < premier.d)) premier = js[0];
+
+  for (const b of document.querySelectorAll('#r-lieux button')) b.classList.toggle('actif', b.dataset.l === lieu);
+  for (const b of document.querySelectorAll('#r-vues button')) b.classList.toggle('actif', b.dataset.v === vue);
+  $('#r-titre').textContent = titrePeriode(vue, p, premier);
+  $('#r-prec').style.visibility = vue !== 'tout' && bornesOk(vue, decaler(vue, p, -1), premier) ? 'visible' : 'hidden';
+  $('#r-suiv').style.visibility = vue !== 'tout' && bornesOk(vue, decaler(vue, p, +1), premier) ? 'visible' : 'hidden';
+
+  if (!premier) {
+    $('#r-tableau').innerHTML = '<div class="message">Pas encore de résumé quotidien enregistré.</div>';
+    return;
+  }
+
+  // Lignes de la période
+  const auj = new Date(), cleAuj = dateCle(auj);
+  const lignes = [];
+  if (vue === 'mois') {
+    for (let j = 1; j <= nbJoursMois(p.an, p.mois); j++) {
+      const d = `${p.an}-${String(p.mois).padStart(2, '0')}-${String(j).padStart(2, '0')}`;
+      if (d > cleAuj) break;
+      const x = new Date(p.an, p.mois - 1, j);
+      lignes.push({ titre: `${JOURS[x.getDay()]} ${j}`, weekend: x.getDay() === 0 || x.getDay() === 6,
+                    filtre: k => k.d === d, aujourdhui: d === cleAuj });
+    }
+  } else if (vue === 'annee') {
+    for (let mo = 1; mo <= 12; mo++) {
+      if (p.an * 12 + mo > auj.getFullYear() * 12 + auj.getMonth() + 1) break;
+      lignes.push({ titre: majuscule(MOIS_LONG[mo - 1]), filtre: k => k.an === p.an && k.mois === mo,
+                    lien: { vue: 'mois', periode: { an: p.an, mois: mo } } });
+    }
+  } else {
+    for (let an = premier.an; an <= auj.getFullYear(); an++) {
+      lignes.push({ titre: String(an), filtre: k => k.an === an, lien: { vue: 'annee', periode: { an, mois: 1 } } });
+    }
+  }
+  const filtrePeriode = vue === 'tout' ? () => true
+    : vue === 'annee' ? k => k.an === p.an : k => k.an === p.an && k.mois === p.mois;
+
+  // Calcul des cellules
+  const valeur = (agg, s) => agg ? (s === 'min' ? agg.min : s === 'max' ? agg.max : agg.moy) : null;
+  const totaux = cols.map(c => agreger(joursParCle[c.cle].filter(filtrePeriode)));
+  const cellule = (c, s, v, record) => {
+    const cls = [s === 'min' ? 'c-min' : s === 'max' ? 'c-max' : '', record ? 'record' : ''].join(' ');
+    return `<td class="${cls}">${fmtVal(v, c, false)}</td>`;
+  };
+
+  // En-têtes
+  let h = '<table><thead><tr><th class="fixe" rowspan="2">' +
+          (vue === 'mois' ? 'Jour' : vue === 'annee' ? 'Mois' : 'Année') + '</th>';
+  for (const c of cols) {
+    h += `<th colspan="${c.stats.length}" class="groupe" style="--c:${c.coul}">` +
+         `<span class="th-ic">${svgIcone(c.icone, c.coul)}</span>${c.nom}` +
+         (c.unite ? `<small> ${c.unite}</small>` : '') + '</th>';
+  }
+  h += '</tr><tr>';
+  for (const c of cols) for (const s of c.stats) h += `<th class="sous">${s === 'moy' ? 'moy.' : s}</th>`;
+  h += '</tr></thead><tbody>';
+
+  // Ligne de synthèse de la période
+  h += `<tr class="total"><th class="fixe">${vue === 'mois' ? 'Mois' : vue === 'annee' ? 'Année' : 'Total'}</th>`;
+  cols.forEach((c, i) => { for (const s of c.stats) h += cellule(c, s, valeur(totaux[i], s), false); });
+  h += '</tr>';
+
+  // Une ligne par jour / mois / année
+  for (const l of lignes) {
+    const cls = [l.weekend ? 'weekend' : '', l.aujourdhui ? 'aujourdhui' : '', l.lien ? 'cliquable' : ''].join(' ');
+    h += `<tr class="${cls}"${l.lien ? ` data-lien='${JSON.stringify(l.lien)}'` : ''}><th class="fixe">${l.titre}</th>`;
+    cols.forEach((c, i) => {
+      const agg = agreger(joursParCle[c.cle].filter(l.filtre));
+      for (const s of c.stats) {
+        const v = valeur(agg, s), t = valeur(totaux[i], s);
+        const record = v != null && t != null && s !== 'moy' && Math.abs(v - t) < 1e-9 && lignes.length > 1;
+        h += cellule(c, s, v, record);
+      }
+    });
+    h += '</tr>';
+  }
+  h += '</tbody></table>';
+  if (vue !== 'mois') h += '<p class="aide">Touchez une ligne pour voir son détail.</p>';
+  $('#r-tableau').innerHTML = h;
+}
+
+/* =====================================================================
+   NAVIGATION (le bouton retour du téléphone / du navigateur ferme les pages)
    ===================================================================== */
 function suivreAdresse() {
   const cle = decodeURIComponent(location.hash.replace(/^#/, ''));
+  if (cle === 'recap') {
+    if (etat.ouvert) fermerDetail();
+    if (!etat.recapOuvert) ouvrirRecap();
+    return;
+  }
+  if (etat.recapOuvert) fermerRecap();
   if (cle && cle !== etat.ouvert) ouvrirDetail(cle);
   else if (!cle && etat.ouvert) fermerDetail();
 }
@@ -641,16 +965,41 @@ function suivreAdresse() {
 document.addEventListener('click', e => {
   const carte = e.target.closest('.carte');
   if (carte) { location.hash = encodeURIComponent(carte.dataset.cle); return; }
+
   const plage = e.target.closest('#plages button');
   if (plage) {
     for (const b of document.querySelectorAll('#plages button')) b.classList.toggle('actif', b === plage);
     etat.plageH = Number(plage.dataset.h);
     chargerDetail();
+    return;
   }
-});
-$('#retour').addEventListener('click', () => {
-  if (history.length > 1 && location.hash) history.back();
-  else { location.hash = ''; fermerDetail(); }
+
+  // Historique du détail : vue et période
+  const hv = e.target.closest('#h-vues button');
+  if (hv) { etat.hVue = hv.dataset.v; rendreHistorique(); return; }
+  if (e.target.closest('#h-prec')) { etat.hPeriode = decaler(etat.hVue, etat.hPeriode, -1); rendreHistorique(); return; }
+  if (e.target.closest('#h-suiv')) { etat.hPeriode = decaler(etat.hVue, etat.hPeriode, +1); rendreHistorique(); return; }
+
+  // Tableau récapitulatif
+  const rl = e.target.closest('#r-lieux button');
+  if (rl) { etat.rLieu = rl.dataset.l; rendreRecap(); return; }
+  const rv = e.target.closest('#r-vues button');
+  if (rv) { etat.rVue = rv.dataset.v; rendreRecap(); return; }
+  if (e.target.closest('#r-prec')) { etat.rPeriode = decaler(etat.rVue, etat.rPeriode, -1); rendreRecap(); return; }
+  if (e.target.closest('#r-suiv')) { etat.rPeriode = decaler(etat.rVue, etat.rPeriode, +1); rendreRecap(); return; }
+  const ligne = e.target.closest('#r-tableau tr[data-lien]');
+  if (ligne) {
+    const l = JSON.parse(ligne.dataset.lien);
+    etat.rVue = l.vue; etat.rPeriode = l.periode;
+    rendreRecap();
+    $('#recap').scrollTop = 0;
+    return;
+  }
+
+  if (e.target.closest('[data-retour]')) {
+    if (history.length > 1 && location.hash) history.back();
+    else { location.hash = ''; fermerDetail(); fermerRecap(); }
+  }
 });
 window.addEventListener('hashchange', suivreAdresse);
 
@@ -659,10 +1008,10 @@ let minuterieTaille = null;
 window.addEventListener('resize', () => {
   clearTimeout(minuterieTaille);
   minuterieTaille = setTimeout(() => {
-    for (const g of Object.values(etat.graphes)) {
-      const el = g && g.root.parentElement;
-      if (el) g.setSize({ width: largeurGraphe(el), height: hauteurGraphe() });
-    }
+    const g = etat.graphes.detail;
+    const el = g && g.root.parentElement;
+    if (el) g.setSize({ width: largeurGraphe(el), height: hauteurGraphe() });
+    if (etat.ouvert) rendreHistorique();
   }, 150);
 });
 
@@ -671,7 +1020,8 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     demarrerDirect();
     chargerSparks();
-    if (etat.ouvert) { chargerDetail(); chargerHistorique(); }
+    if (etat.ouvert) { chargerDetail(); chargerResumes(true).then(rendreHistorique).catch(() => {}); }
+    if (etat.recapOuvert) chargerResumes(true).then(rendreRecap).catch(() => {});
   } else {
     arreterDirect();
   }
@@ -680,6 +1030,7 @@ document.addEventListener('visibilitychange', () => {
 /* =====================================================================
    DÉMARRAGE
    ===================================================================== */
+etat.rPeriode = aujourdHui();
 majHeure();
 setInterval(majHeure, 10000);
 rendreAccueil();

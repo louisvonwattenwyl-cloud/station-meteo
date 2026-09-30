@@ -2,18 +2,18 @@
    s'ouvre vite (et même sans réseau). Les données Firebase ne sont jamais
    mises en cache : elles viennent toujours du réseau.
    Pour forcer une mise à jour chez tout le monde, change VERSION. */
-const VERSION = 'meteo-v1';
+const VERSION = 'meteo-v2';
 const FICHIERS = [
   './',
   'index.html',
   'app.js',
   'style.css',
   'manifest.webmanifest',
-  'lib/uPlot.iife.min.js',
-  'lib/uPlot.min.css',
-  'icons/icon-192.png',
-  'icons/icon-512.png',
-  'icons/apple-touch-icon.png',
+  'uplot.min.js',
+  'uplot.min.css',
+  'icone-192.png',
+  'icone-512.png',
+  'apple-touch-icon.png',
 ];
 
 self.addEventListener('install', e => {
