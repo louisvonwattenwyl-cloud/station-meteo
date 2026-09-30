@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ma Station Météo</title>
+<meta name="description" content="Mesures en direct et historique de ma station météo">
+<meta name="theme-color" content="#000000">
+
+<!-- Application installable (iPhone : Partager → Sur l'écran d'accueil) -->
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Météo">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+
+<link rel="stylesheet" href="lib/uPlot.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ====================== ACCUEIL ====================== -->
+<header class="entete">
+  <div class="entete-gauche">
+    <span class="heure" id="heure">--:--</span>
+    <span class="date" id="date"></span>
+  </div>
+  <div class="entete-droite">
+    <span class="etat" id="etat-ext"><i></i>Extérieur</span>
+    <span class="etat" id="etat-int"><i></i>Intérieur</span>
+  </div>
+</header>
+
+<main id="accueil">
+  <div class="alerte" id="alerte" hidden></div>
+
+  <section>
+    <h2 class="titre-section ext">EXTÉRIEUR</h2>
+    <div class="grille" id="cartes-ext">
+      <p class="vide">En attente de la station extérieure…</p>
+    </div>
+  </section>
+
+  <section>
+    <h2 class="titre-section int">INTÉRIEUR</h2>
+    <div class="grille" id="cartes-int"></div>
+  </section>
+
+  <p class="pied">Touchez une mesure pour voir son historique.</p>
+</main>
+
+<!-- ====================== DÉTAIL D'UNE MESURE ====================== -->
+<div class="detail" id="detail" hidden>
+  <header class="detail-entete">
+    <button class="retour" id="retour" aria-label="Retour">‹</button>
+    <span class="detail-icone" id="d-icone"></span>
+    <div class="detail-titre">
+      <span class="detail-lieu" id="d-lieu"></span>
+      <h1 id="d-nom"></h1>
+    </div>
+    <div class="detail-valeur" id="d-valeur"></div>
+  </header>
+
+  <div class="detail-contenu">
+    <section class="bloc">
+      <div class="bloc-haut">
+        <h3>Évolution détaillée</h3>
+        <div class="segments" id="plages">
+          <button data-h="24">24 h</button>
+          <button data-h="72" class="actif">3 j</button>
+          <button data-h="120">5 j</button>
+          <button data-h="720">30 j</button>
+        </div>
+      </div>
+      <div class="stats" id="d-stats"></div>
+      <div class="graphe" id="g-detail"></div>
+      <p class="aide">Glissez sur le graphe pour zoomer, double-touchez pour revenir.</p>
+    </section>
+
+    <section class="bloc">
+      <div class="bloc-haut">
+        <h3>Historique complet</h3>
+        <span class="sous-titre">min et max de chaque jour</span>
+      </div>
+      <div class="stats" id="h-stats"></div>
+      <div class="graphe" id="g-histo"></div>
+    </section>
+  </div>
+</div>
+
+<script src="lib/uPlot.iife.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
